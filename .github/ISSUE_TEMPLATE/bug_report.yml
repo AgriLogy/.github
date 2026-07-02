@@ -1,0 +1,30 @@
+name: Bug report
+description: Something is broken
+title: "bug: "
+labels: [bug]
+assignees:
+  - mks-zakaria
+body:
+  - type: input
+    id: repo-area
+    attributes:
+      label: Area
+      description: Which repo/service/screen is affected?
+      placeholder: agri-api /api/v2/alerts, agri-front dashboard, ...
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+      placeholder: Steps to reproduce, expected vs actual.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Environment (staging/production), logs, screenshots, request/response snippets.
+    validations:
+      required: false

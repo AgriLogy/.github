@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new feature or improvement
+title: "feat: "
+labels: [enhancement]
+assignees:
+  - mks-zakaria
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What need does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should happen, and where (which repo/service)?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
