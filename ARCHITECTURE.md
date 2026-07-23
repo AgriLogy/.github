@@ -7,7 +7,7 @@
 > Per-repo build/test/PR instructions live in each repo's `CONTRIBUTING.md`.
 > This file is the map; those files are the ground.
 >
-> _Last updated: 2026-07-22._
+> _Last updated: 2026-07-23._
 
 ---
 
@@ -221,9 +221,56 @@ sequenceDiagram
 ```
 
 > A device is moved from HTTP to MQTT by deleting its ChirpStack HTTP
-> integration. `MQTT_HOST` lives in `/root/agri-api/.env` on the droplet.
+> integration. **MQTT is now the only route from ChirpStack** —
+> `application_integration` holds no HTTP rows. `MQTT_HOST` lives in
+> `/root/agri-api/.env` (the compose-project env file; compose `environment:`
+> overrides `back/.env`, so editing the repo one changes nothing).
 > `agri-api-mqtt` is **not** recreated by the deploy workflow — force-recreate it
 > after each deploy (see `agri-api/CONTRIBUTING.md`).
+
+---
+
+## 5b. Operational state — what is actually live
+
+_Snapshot 2026-07-23. Established by read-only investigation; keep it honest._
+
+**There are exactly two real hardware feeds in production.** Everything else in
+the database is simulated or seeded — a fact worth knowing before trusting a
+dashboard.
+
+| Feed | Owner | Transport | State |
+| --- | --- | --- | --- |
+| Router02 **weather** (wind, temp, humidity, pressure, solar) | user 4 / zone 1 | Bivocom HTTP → `agryserver:9090` → legacy `agrybackend` | ✅ live |
+| ET₀ / VPD for zone 1 (derived) | user 4 / zone 1 | Celery `compute_et0_vpd_hourly` | ✅ live |
+| Router02 **soil probe** (moisture / temp / EC × low+medium) | user 4 / zone 1 | same Bivocom path, separate POST stream | ❌ dead since 2026-07-13 14:01 — field hardware |
+| LoRa node `ph` (`a840412ca45d64d0`) | user 8 / zone 11 | ChirpStack → MQTT → `agri-api-mqtt` | ❌ dead since 2026-07-13 15:13 — gateway off air |
+| Simulator, ~30 tables, zones 6 & 7 | user 1 | Celery `simulate_sensor_ingest` | ⏹ retired by the F10 beat cutover |
+
+Two independent failures 72 minutes apart, neither of them a software bug, and
+**nothing alerted** — because device-health scanning was itself broken and the
+one real Bivocom router is not registered in `analytics_device` at all. Staleness
+alerting on `max(received_at)` is the gap to close: it is transport-agnostic and
+catches hardware failure, which no log-based alert can.
+
+### Schema drift — the shape of a recurring bug class
+
+Production is **stamped 12 revisions behind** the Alembic head, but physically
+almost current: most intervening objects were applied out-of-band by the old
+ensure-scripts. Only two are genuinely missing — `analytics_devicesensor`, and
+`analytics_device.latitude`/`.longitude`.
+
+Both are referenced by live code. Only one caused incidents:
+
+| Reference | Guarded? | Outcome |
+| --- | --- | --- |
+| `sectors.py::farm_overview` → `analytics_devicesensor` | ✅ `begin_nested()` SAVEPOINT, degrades to "no configured captors" | absent for weeks, endpoint fine |
+| device coordinates, several call sites | ❌ raw select, no fallback | three separate production defects |
+
+**The rule this implies:** any code touching an object whose migration has not
+been applied to production must degrade, not raise. Copy the `sectors.py`
+SAVEPOINT pattern, or the cached probe in `fastapp/schema_compat.py`. Better
+still, apply the migration — the pending revisions use idempotent DDL, so the
+cutover creates only those two missing objects.
 
 ---
 
