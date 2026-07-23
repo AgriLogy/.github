@@ -95,7 +95,10 @@ python-semantic-release. Frameworks (Django/DRF/FastAPI) are allowed only in
 | **.github** | Org profile, default PR template, this document | Markdown | `main` |
 
 Every repo carries a `CONTRIBUTING.md` at its root with the exact setup, dev-loop
-and CI commands for that repo.
+and CI commands for that repo. **All AgriLogy org repos are PUBLIC** as of
+2026-07-23 (done to restore CI when private-repo Actions minutes were exhausted).
+Histories were credential-scanned first; the droplet IP + topology are now public,
+which is why the firewall items below became urgent.
 
 ---
 
@@ -234,43 +237,46 @@ sequenceDiagram
 
 _Snapshot 2026-07-23. Established by read-only investigation; keep it honest._
 
-**There are exactly two real hardware feeds in production.** Everything else in
-the database is simulated or seeded — a fact worth knowing before trusting a
-dashboard.
+**There are exactly two real hardware feeds in production** (both currently
+**offline on purpose** — the owner disconnected the devices). Everything else in
+the database is simulated or seeded — worth knowing before trusting a dashboard.
 
 | Feed | Owner | Transport | State |
 | --- | --- | --- | --- |
 | Router02 **weather** (wind, temp, humidity, pressure, solar) | user 4 / zone 1 | Bivocom HTTP → `agryserver:9090` → legacy `agrybackend` | ✅ live |
 | ET₀ / VPD for zone 1 (derived) | user 4 / zone 1 | Celery `compute_et0_vpd_hourly` | ✅ live |
-| Router02 **soil probe** (moisture / temp / EC × low+medium) | user 4 / zone 1 | same Bivocom path, separate POST stream | ❌ dead since 2026-07-13 14:01 — field hardware |
-| LoRa node `ph` (`a840412ca45d64d0`) | user 8 / zone 11 | ChirpStack → MQTT → `agri-api-mqtt` | ❌ dead since 2026-07-13 15:13 — gateway off air |
+| Router02 **soil probe** (moisture / temp / EC × low+medium) | user 4 / zone 1 | same Bivocom path, separate POST stream | ⏸ owner-disconnected since 2026-07-13 |
+| LoRa node `ph` (`a840412ca45d64d0`) | user 8 / zone 11 | ChirpStack → MQTT → `agri-api-mqtt` | ⏸ owner-disconnected since 2026-07-13 |
 | Simulator, ~30 tables, zones 6 & 7 | user 1 | Celery `simulate_sensor_ingest` | ⏹ retired by the F10 beat cutover |
 
-Two independent failures 72 minutes apart, neither of them a software bug, and
-**nothing alerted** — because device-health scanning was itself broken and the
-one real Bivocom router is not registered in `analytics_device` at all. Staleness
-alerting on `max(received_at)` is the gap to close: it is transport-agnostic and
-catches hardware failure, which no log-based alert can.
+The soil-probe and LoRa feeds stopping was **not a failure** — the hardware was
+unplugged deliberately (investigated in agri-api#430). The last reading in each
+case was received and stored cleanly, then simply stopped: the signature of a
+clean disconnect. `agri-api-mqtt` and the broker path were repaired anyway (#426
+subscriber-on-broker-network, #427 broker rebound to loopback), so LoRa ingest
+resumes the moment those devices are reconnected.
 
-### Schema drift — the shape of a recurring bug class
+> **If staleness alerting is ever added** (agri-api#429): a naive `max(received_at)`
+> alert would page for these intentionally-off devices. It must watch only feeds
+> meant to be always-on, or support marking a device "offline on purpose."
+> Device-health scanning itself is fixed (#433) — it was silently failing on a
+> missing column before.
 
-Production is **stamped 12 revisions behind** the Alembic head, but physically
-almost current: most intervening objects were applied out-of-band by the old
-ensure-scripts. Only two are genuinely missing — `analytics_devicesensor`, and
-`analytics_device.latitude`/`.longitude`.
+### Schema drift — a bug class now closed at the source
 
-Both are referenced by live code. Only one caused incidents:
+Production was long **stamped behind** the Alembic head (the DB was hand-built by
+ensure-scripts, so the stamp understated what physically existed). As of
+2026-07-23 the cutover is complete: **prod is stamped at head**, and
+`RUN_DB_MIGRATIONS=true` is on, so every deploy runs `upgrade head` before the
+app containers boot. A schema-dependent deploy no longer 500s against an
+un-migrated column (the RBAC `access_level` deploy did exactly that — it took the
+whole authenticated API down for ~3 min until the migration was applied by hand;
+that class is now prevented, agri-api#448).
 
-| Reference | Guarded? | Outcome |
-| --- | --- | --- |
-| `sectors.py::farm_overview` → `analytics_devicesensor` | ✅ `begin_nested()` SAVEPOINT, degrades to "no configured captors" | absent for weeks, endpoint fine |
-| device coordinates, several call sites | ❌ raw select, no fallback | three separate production defects |
-
-**The rule this implies:** any code touching an object whose migration has not
-been applied to production must degrade, not raise. Copy the `sectors.py`
-SAVEPOINT pattern, or the cached probe in `fastapp/schema_compat.py`. Better
-still, apply the migration — the pending revisions use idempotent DDL, so the
-cutover creates only those two missing objects.
+**The durable rule this leaves:** code touching an object whose migration may not
+be applied yet must **degrade, not raise** — copy the `sectors.py` `begin_nested()`
+SAVEPOINT, or the cached probe in `fastapp/schema_compat.py`. Belt-and-suspenders
+on top of auto-apply.
 
 ---
 
@@ -370,8 +376,9 @@ flowchart LR
 - PR titles must be Conventional Commits (enforced) — they become release commits.
 - **Release order across repos:** `agri-db` → `agri-core` → `agri-api`; downstream
   repos pin upstream by git tag.
-- **Schema order:** apply agri-db migrations *before* deploying the agri-api that
-  needs them.
+- **Schema order:** now automated — `RUN_DB_MIGRATIONS=true` on the droplet runs
+  `agri-migrate upgrade head` before app containers boot, so schema lands with the
+  code. A failed migration aborts the deploy (`script_stop`) — the safe failure.
 - Shared CI lives in `shared-workflows`, consumed as `@v1`.
 
 ### Environments
@@ -382,9 +389,10 @@ flowchart LR
 | staging | Vercel preview / staging project | agri-api `*-staging` stack on the droplet (`:90xx`) | `agrydata-staging` |
 | production | Vercel prod (`app.` / `admin.` / `identity.`) | agri-api stack behind `back.agrogo-datafarm.com` | `agrydata` |
 
-> The staging tier is **decided but not yet built** — same-droplet separate stack
-> at `staging.agrogo-datafarm.com`, gated on DNS, Vercel envs and branch-strategy
-> sign-off.
+> The staging tier is **started but BLOCKED** (agri-api#418): DNS is live
+> (`staging.agrogo-datafarm.com` → the droplet) and the stack is defined, but the
+> 2 GB droplet has only ~550 MB free — it cannot host a second stack + Postgres
+> without OOM-risking prod. Needs a resize (2→4 GB) or a lighter design.
 
 ---
 
@@ -436,13 +444,21 @@ a worked example, CI and deploy path. Platform-wide rules:
 - Auto-sync `deploy/nginx/back.conf` into the deploy pipeline (currently manual).
 
 **Platform**
-- ⚠️ **Staging environment** — build the decided preprod tier (§9).
-- **User-management RBAC** — Admin / Editor / Monitor tiers across db → api →
-  admin → web; migration held.
-- Droplet has **no firewall** — Postgres 5432, Redis 6379, Adminer 8080 are
-  publicly exposed. Add a DO Cloud Firewall.
+- ⚠️ **Staging environment** — BLOCKED on droplet RAM (§9, agri-api#418).
+- ⚠️ **Firewall** — Postgres 5432 + Redis 6379 are now closed via host `DOCKER-USER`
+  iptables (SSH-safe, but **not reboot-durable**). The proper fix is a DO Cloud
+  Firewall at the edge (needs a DO API token). mosquitto 1883 rebound to loopback
+  (#427). Adminer 8080 already closed. This is the top open security item now that
+  the repos are public.
 - Deploy leaves the Celery worker/beat containers stranded in `created`; the fix is
   a `start_period` on the web healthcheck.
+
+**Shipped 2026-07-23** (all five field-review features live in prod)
+- **MAP-1** device GPS · **GRP-1** sensor groups · **CAL-1** per-sensor calibration
+  (incl. single-point read-path application) · **USR-1** RBAC Admin/Editor/Monitor
+  end-to-end · **RPT-1** alert + irrigation-decision history & report view.
+- Prod schema cutover to head; `RUN_DB_MIGRATIONS` turned on (§9).
+- MQTT ingest path repaired (#426/#427); assistant now renders Markdown (#105).
 
 **Weather / agronomy**
 - ⚠️ **Real ET₀ forecast provider** — wire Open-Meteo (keyless) or OpenWeather in
