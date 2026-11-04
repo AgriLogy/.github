@@ -283,8 +283,9 @@ on top of auto-apply.
 ## 6. Data flow — ET₀ 7-day forecast (worked example)
 
 The dashboard's **"ET₀ — prévision sur 7 jours"** widget is a good end-to-end
-example of a fully-migrated feature. ⚠️ **Its weather input is currently
-synthetic** (a deterministic mock), while the ET₀ math is real FAO-56.
+example of a fully-migrated feature. Weather input is a **real Open-Meteo
+forecast** (keyless, hourly → daily), fed into real FAO-56 ET₀ math; the
+deterministic mock is only a fallback.
 
 ```mermaid
 sequenceDiagram
@@ -300,19 +301,18 @@ sequenceDiagram
     FA->>DB: zone (elevation) + user (lat/lon)
     DB-->>FA: owner-scoped row (404 if not owner)
     FA->>PV: get_daily_forecast(start, days, lat)
-    Note over PV: ET_FORECAST_PROVIDER=mock (default)<br/>→ deterministic seasonal model.<br/>"openweather" is a stub → falls back to mock.
-    PV-->>FA: daily weather series (synthetic)
+    Note over PV: ET_FORECAST_PROVIDER=openmeteo (default)<br/>hourly forecast → daily aggregates (30 min cache).<br/>No coords / network error / ET0_OPENMETEO=off → mock.
+    PV-->>FA: daily weather series + provider actually used
     FA->>CO: et0_forecast(daily, lat, lon, elev)
     CO-->>FA: [{date, et0_mm}] (real FAO-56 Penman-Monteith)
     FA-->>UI: {zone_id, provider, days}
-    Note over UI: Graph renders a source label from `provider`:<br/>"demo model" while mock, real name once wired.
+    Note over UI: `provider` is "open-meteo" only when real data<br/>served the request, "mock" on fallback.
 ```
 
-**To make it a real forecast:** implement `_openweather_forecast` (or add an
-Open-Meteo provider — no API key needed) in
-`agri-api/back/src/apps/sensors/forecast_provider.py`, then set
-`ET_FORECAST_PROVIDER` + `WEATHER_API_KEY`. The frontend label updates
-automatically. This provider will move into `agri-core` in a later phase.
+**Provider:** `agri-api/back/src/apps/sensors/forecast_provider.py`. Coordinates
+come from the farmer's picked location → account lat/lon → zone weather coords.
+`provider` in the response is `"open-meteo"` only when real data served the
+request (otherwise `"mock"`). This provider will move into `agri-core` later.
 
 ---
 
@@ -461,8 +461,7 @@ a worked example, CI and deploy path. Platform-wide rules:
 - MQTT ingest path repaired (#426/#427); assistant now renders Markdown (#105).
 
 **Weather / agronomy**
-- ⚠️ **Real ET₀ forecast provider** — wire Open-Meteo (keyless) or OpenWeather in
-  `forecast_provider.py`; replaces the demo mock (§6).
+- ✅ ~~Real ET₀ forecast provider~~ — Open-Meteo wired as the default (§6).
 - Move the forecast provider into `agri-core`.
 
 **Notifications & alerts**
